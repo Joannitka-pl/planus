@@ -1,0 +1,204 @@
+---
+version: 2.1
+
+executors:
+  app:
+    docker:
+      - image: cimg/ruby:3.1
+        environment:
+          RAILS_ENV: test
+          DATABASE_URL: postgres://postgres:password@127.0.0.1:5432
+      - image: cimg/postgres:13.5
+        environment:
+          POSTGRES_PASSWORD: password
+
+    working_directory: ~/repo
+
+jobs:
+  build:
+    executor: app
+
+    steps:
+      - checkout
+
+      # Download and cache dependencies
+      - restore_cache:
+          keys:
+            - v1-dependencies-{{ checksum "Gemfile.lock" }}
+            # fallback to using the latest cache if no exact match is found
+            - v1-dependencies-
+
+      - run: bundle config set path 'vendor/bundle'
+
+      - run:
+          name: install dependencies
+          command: bundle install --jobs=4 --retry=3
+
+      - save_cache:
+          paths:
+            - ./vendor/bundle
+          key: v1-dependencies-{{ checksum "Gemfile.lock" }}
+
+      - persist_to_workspace:
+          root: .
+          paths:
+            - vendor/bundle
+
+  build_docs:
+    executor: app
+
+    steps:
+      - checkout
+
+      - attach_workspace:
+          at: .
+
+      - run: bundle config set path 'vendor/bundle'
+      - run: bundle
+
+      - run:
+          name: Generate documentation
+          command: ./bin/yard doc
+
+      - store_artifacts:
+          path: doc
+
+  bundle_audit:
+    executor: app
+
+    steps:
+      - checkout
+
+      - attach_workspace:
+          at: .
+
+      - run: bundle config set path 'vendor/bundle'
+      - run: bundle
+
+      - run:
+          name: Audit gems
+          command: ./bin/bundle-audit check --update
+
+  brakeman:
+    executor: app
+
+    steps:
+      - checkout
+
+      - attach_workspace:
+          at: .
+
+      - run: bundle config set path 'vendor/bundle'
+      - run: bundle
+
+      - run:
+          name: Run security scanner
+          command: ./bin/brakeman -w2 -o brakeman_output.html
+
+      - store_artifacts:
+          path: brakeman_output.html
+
+  lint:
+    executor: app
+
+    steps:
+      - checkout
+
+      - attach_workspace:
+          at: .
+
+      - run: bundle config set path 'vendor/bundle'
+      - run: bundle
+
+      - run:
+          name: Lint changes
+          command: ./bin/rubocop
+
+  verify_seeds:
+    executor: app
+
+    steps:
+      - checkout
+
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y postgresql-client
+
+      - attach_workspace:
+          at: .
+
+      - run: bundle config set path 'vendor/bundle'
+      - run: bundle
+
+      - run: ./bin/rails db:create db:schema:load
+      - run:
+          name: check if seeds wont raise errors
+          command: ./bin/rails db:seed
+
+  verify_migrations:
+    executor: app
+
+    steps:
+      - checkout
+
+      - attach_workspace:
+          at: .
+
+      - run: bundle config set path 'vendor/bundle'
+      - run: bundle
+
+      - run: ./bin/rails db:create
+      - run:
+          name: check if migrations won't raise errors
+          command: ./bin/rails db:migrate
+      - run:
+          name: check if schema is up to date
+          command: git diff --quiet HEAD
+
+  test:
+    executor: app
+
+    steps:
+      - checkout
+
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y postgresql-client
+
+      - attach_workspace:
+          at: .
+
+      - run: bundle config set path 'vendor/bundle'
+      - run: bundle
+
+      - run: ./bin/rails db:create db:schema:load
+
+      - run:
+          name: run tests
+          command: ./bin/rspec --format progress
+
+workflows:
+  version: 2
+  build_and_test:
+    jobs:
+      - build
+      - brakeman:
+          requires:
+            - build
+      - build_docs:
+          requires:
+            - build
+      - bundle_audit:
+          requires:
+            - build
+      - lint:
+          requires:
+            - build
+      - verify_seeds:
+          requires:
+            - build
+      - verify_migrations:
+          requires:
+            - build
+      - test:
+          requires:
+            - build
+
